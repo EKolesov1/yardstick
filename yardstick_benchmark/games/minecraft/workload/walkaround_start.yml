@@ -18,7 +18,7 @@
           source ~/.bashrc
           node set_spawn.js
         chdir: "{{wd}}"
-      run_once: true # Only run on one machine
+      run_once: true 
     - name: Run Minecraft bot
       shell:
         cmd: |

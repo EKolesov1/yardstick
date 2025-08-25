@@ -1,27 +1,52 @@
 ---
 - name: Deploy Telegraf
-  gather_facts: true
   hosts: all
+  gather_facts: true
+  vars:
+    wd: "{{ wd_base }}/{{ inventory_hostname }}" 
+    telegraf_version: "1.30.3"
   tasks:
     - name: Create Telegraf directory
       file:
-        path: "{{wd}}"
+        path: "{{ wd }}"
         state: directory
     - name: Download Telegraf
       unarchive:
-        src: https://dl.influxdata.com/telegraf/releases/telegraf-1.30.3_linux_amd64.tar.gz
-        dest: "{{wd}}"
+        src: "https://dl.influxdata.com/telegraf/releases/telegraf-{{ telegraf_version }}_linux_amd64.tar.gz"
+        dest: "{{ wd }}"
         remote_src: true
-        creates: "{{wd}}/telegraf-1.30.3_linux_amd64"
+        creates: "{{ wd }}/telegraf-{{ telegraf_version }}_linux_amd64"
     - name: Copy Telegraf config
       template:
-        src: "{{config_template}}"
-        dest: "{{wd}}/telegraf-{{inventory_hostname}}.conf"
+        src: "{{ config_template | default('telegraf.conf.j2') }}"
+        dest: "{{ wd }}/telegraf-{{ inventory_hostname }}.conf"
+    
+    - name: Append procstat input for Paper process (Java)
+      blockinfile:
+        path: "{{wd}}/telegraf-{{inventory_hostname}}.conf"
+        marker: "# {mark} YARDSTICK PROCSTAT"
+        block: |
+          [[inputs.procstat]]
+            pattern = '.*paper-.*\.jar'
+            pid_finder = "native"
+            interval = "1s"
+            fieldpass = ["read_bytes","write_bytes","read_count","write_count"]
+    
+    
 - name: Deploy Minecraft tick collection execd input script
   gather_facts: true
-  hosts: minecraft_servers
+  hosts: all
+  vars:
+    wd: "{{ wd_base }}/{{ inventory_hostname }}"
   tasks:
-    - name: Copy Minecraft tick collection input script
+    - name: Ensure per-host wd exists
+      file:
+        path: "{{ wd }}"
+        state: directory
+        mode: "0755"
+    - name: Copy Minecraft tick collection input script (only where execd is enabled)
       copy:
-        src: "{{jolokia_get_minecraft_tick_script_path}}"
-        dest: "{{wd}}"
+        src: "{{ jolokia_get_minecraft_tick_script_path }}"
+        dest: "{{ wd }}/jolokia_get_minecraft_tick.py"
+        mode: "0644"
+      when: inventory_hostname in execd_minecraft_ticks

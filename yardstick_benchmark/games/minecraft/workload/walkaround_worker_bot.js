@@ -29,7 +29,7 @@ function nextGoal(bot) {
 let worker_bot = mineflayer.createBot({
     host: host, // minecraft server ip
     username: username, // minecraft username
-    port: 25565,                // only set if you need a port that isn't 25565
+    port: 25565,       
 });
 worker_bot.on('kicked', console.log)
 worker_bot.on('error', console.log)
@@ -39,13 +39,12 @@ worker_bot.once("spawn", async () => {
     defaultMove.allowSprinting = false
     defaultMove.canDig = false
     worker_bot.pathfinder.setMovements(defaultMove)
-    // worker_bot.pathfinder.thinkTimeout = 60000 // max 60 seconds to find path from start to finish
+    // worker_bot.pathfinder.thinkTimeout = 60000. max 60 seconds to find path from start to finish
     while (true) {
         let goal = nextGoal(worker_bot);
         try {
             await worker_bot.pathfinder.goto(goal)
         } catch (e) {
-            // if the bot cannot find a path, carry on and let it try to move somewhere else
             if (e.name != "NoPath" && e.name != "Timeout") {
                 throw e
             }
@@ -53,4 +52,4 @@ worker_bot.once("spawn", async () => {
     }
 });
 
-// parentPort.postMessage({});
+

@@ -1,16 +1,185 @@
 ---
-- name: Deploy PaperMC
-  gather_facts: true
+- name: Start PaperMC (JDK21-bundled)
   hosts: all
+  gather_facts: true
+
+  vars:
+    wd: "/local/{{ (ansible_user | default(ansible_env.USER)) }}/papermc"
+    papermc_dir: "{{ wd }}"
+    jolokia_version: "2.0.3"
+
+    jdk21_url: "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse?project=jdk"
+    jdk21_dir: "{{ wd }}/jdk21"
+    jdk21_tar: "{{ wd }}/jdk21.tar.gz"
+
   tasks:
-    - name: Run PaperMC
-      shell:
-        cmd: |
-          module load java/jdk-17 || true # just in case we are on DAS
-          nohup java -javaagent:jolokia-agent-jvm-2.0.3-javaagent.jar -jar paper-1.20.1-58.jar &> /dev/null &
-          echo $! > papermc.pid
-        chdir: "{{ wd }}"
-    - name: Waiting for server to become ready
-      wait_for:
-        path: "{{wd}}/logs/latest.log"
-        search_regex: 'For help, type "help"'
+    # Ensure working dir exists (server only)
+    - name: Ensure PaperMC working dir exists on local disk (server only)
+      ansible.builtin.file:
+        path: "{{ wd }}"
+        state: directory
+        mode: "0755"
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    # PRE-START: wipe Paper version-specific configs
+    - name: Stat PaperMC dir (server only)
+      ansible.builtin.stat:
+        path: "{{ papermc_dir }}"
+      register: papermc_stat
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    - name: Find Paper YAML configs that can clash across versions (server only)
+      ansible.builtin.find:
+        paths: "{{ papermc_dir }}"
+        patterns:
+          - "paper-*.yml"          # e.g., paper-global.yml, paper-world-defaults.yml
+          - "paper-world*.yml"     # per-world files (world*/paper-world.yml)
+        recurse: yes
+      register: paper_cfgs
+      when:
+        - inventory_hostname == ansible_play_hosts_all[0]
+        - papermc_stat.stat.exists | default(false)
+
+    - name: Remove found Paper YAML configs (server only)
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ paper_cfgs.files | default([]) }}"
+      when:
+        - inventory_hostname == ansible_play_hosts_all[0]
+        - (paper_cfgs.matched | default(0) | int) > 0
+
+    - name: Remove crash reports (if any) (server only)
+      ansible.builtin.file:
+        path: "{{ papermc_dir }}/crash-reports"
+        state: absent
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    - name: Reset worlds for fresh chunk gen (server only)
+      ansible.builtin.file:
+        path: "{{ wd }}/{{ item }}"
+        state: absent
+      loop:
+        - world
+        - world_nether
+        - world_the_end
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    # Clear any stale markers on all nodes (once)
+    - name: Clear old PaperMC server markers
+      ansible.builtin.file:
+        path: /tmp/yardstick_papermc_server
+        state: absent
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['all'] }}"
+      run_once: true
+
+    # Fetch and extract JDK21 (server only) 
+    - name: Ensure JDK21 dir exists (server only)
+      ansible.builtin.file:
+        path: "{{ jdk21_dir }}"
+        state: directory
+        mode: "0755"
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    - name: Download portable JDK 21 (server only, idempotent)
+      ansible.builtin.get_url:
+        url: "{{ jdk21_url }}"
+        dest: "{{ jdk21_tar }}"
+        mode: "0644"
+        force: no            
+        timeout: 60
+        headers:
+          Accept: application/octet-stream
+      register: jdk_dl
+      retries: 3
+      delay: 5
+      until: jdk_dl is succeeded
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    - name: Extract JDK 21 (server only, idempotent)
+      ansible.builtin.unarchive:
+        src: "{{ jdk21_tar }}"
+        dest: "{{ jdk21_dir }}"
+        remote_src: true
+        extra_opts: ["--strip-components=1"]
+        creates: "{{ jdk21_dir }}/bin/java"
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    - name: Assert JDK extracted (server only)
+      ansible.builtin.stat:
+        path: "{{ jdk21_dir }}/bin/java"
+      register: j21
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    - name: Fail if JDK not extracted (server only)
+      ansible.builtin.fail:
+        msg: "Bundled JDK 21 not present at {{ jdk21_dir }}/bin/java"
+      when:
+        - inventory_hostname == ansible_play_hosts_all[0]
+        - not j21.stat.exists
+    # Start Paper with the bundled JDK21
+    - name: Run PaperMC (server only)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cd "{{ wd }}"
+
+        # Use bundled JDK21
+        JAVA_BIN="{{ jdk21_dir }}/bin/java"
+
+        # Log & verify version (abort if < 21)
+        {
+          echo "=== Yardstick Paper start ==="
+          echo "JAVA_BIN: $JAVA_BIN"
+          "$JAVA_BIN" -version
+        } >> server.log 2>&1
+
+        MAJOR=$("$JAVA_BIN" -version 2>&1 | sed -n 's/.*version "\(.*\)".*/\1/p' | awk -F. '{print ($1==1)?$2:$1}')
+        if [ -z "${MAJOR:-}" ] || [ "$MAJOR" -lt 21 ]; then
+          echo "ERROR: Need Java 21+, got: $("$JAVA_BIN" -version 2>&1 | head -n1)" >&2
+          exit 1
+        fi
+
+        # Rotate old logs to avoid stale "Done (" matches
+        if [ -d logs ]; then mv logs "logs.bak.$(date +%s)"; fi
+        mkdir -p logs
+
+        nohup "$JAVA_BIN" \
+          -Duser.timezone=UTC \
+          -javaagent:"{{ wd }}/jolokia-agent-jvm-{{ jolokia_version }}-javaagent.jar"=host=127.0.0.1,port=8778,quiet=true,discoveryEnabled=false \
+          -jar "paper-{{ papermc_version }}-{{ papermc_build }}.jar" nogui \
+          >> server.log 2>&1 &
+
+        echo $! > papermc.pid
+      args:
+        executable: /bin/bash
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    # Post-start waits (fresh ports & logs)
+    - name: Wait for Minecraft server port 25565 (server only)
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 25565
+        timeout: 180
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    - name: Wait for Jolokia agent on 8778 (server only)
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 8778
+        timeout: 60
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    - name: Wait for "Done (" in latest.log (server only)
+      ansible.builtin.wait_for:
+        path: "{{ wd }}/logs/latest.log"
+        search_regex: 'Done \('
+        timeout: 180
+      when: inventory_hostname == ansible_play_hosts_all[0]
+
+    - name: Mark this host as PaperMC server (server only, after start)
+      ansible.builtin.copy:
+        dest: /tmp/yardstick_papermc_server
+        content: "{{ inventory_hostname }}"
+        mode: "0644"
+      when: inventory_hostname == ansible_play_hosts_all[0]

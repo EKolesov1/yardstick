@@ -1,0 +1,32 @@
+- name: Start ComplexWalkAround
+  gather_facts: true
+  hosts: all
+
+  tasks:
+    - name: Set world spawn on server
+      shell: >
+        node {{ wd }}/complex_set_spawn.js --host {{ mc_host }}
+      args:
+        chdir: "{{ wd }}"
+        executable: /bin/bash
+      when: inventory_hostname == hostnames[0]
+
+    - name: Launch complex worker bots on workers
+      shell: |
+        . "$HOME/.nvm/nvm.sh"
+        nohup node {{ wd }}/complex_worker_bot.js \
+          --host {{ mc_host }} \
+          --port 25565 \
+          --bots-per-node {{ bots_per_node }} \
+          --range {{ tp_range | default(radius | default(800)) }} \
+          --goal_interval 20 \
+          --build_interval 7 \
+          --mine_interval 11 \
+          --flush_every 60 \
+          --rcon_port {{ rcon_port | default(25575) }} \
+          --rcon_password {{ rcon_password | default('password') }} \
+        &> {{ wd }}/complex_walkaround.log & echo $! > {{ wd }}/complex.pid
+      args:
+        chdir: "{{ wd }}"
+        executable: /bin/bash
+      when: inventory_hostname in hostnames[1:]

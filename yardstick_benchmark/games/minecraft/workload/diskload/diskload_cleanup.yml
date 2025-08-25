@@ -1,0 +1,14 @@
+- name: Cleanup DiskLoad
+  gather_facts: true
+  hosts: all
+  tasks:
+
+    - name: Remove JS scripts
+      file:
+        path: "{{ wd }}/diskload*.js"
+        state: absent
+
+    - name: Remove log file
+      file:
+        path: "{{ wd }}/diskload.log"
+        state: absent

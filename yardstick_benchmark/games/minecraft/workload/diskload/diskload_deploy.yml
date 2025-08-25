@@ -1,0 +1,91 @@
+- name: Deploy DiskLoad workload
+  hosts: all
+  gather_facts: true
+
+  # We'll compute wd from a robust wd_base fallback in pre_tasks
+  vars:
+    # no direct wd here; set in pre_tasks
+    node_version: "18"
+
+  pre_tasks:
+    - name: Compute effective user name for paths
+      set_fact:
+        _user_effective: >-
+          {{ (ansible_user | default(ansible_user_id, true))
+             | default(ansible_env.USER, true)
+             | default(lookup('env','USER'), true)
+             | default('unknown') }}
+
+    - name: Compute wd_base (fallback to /local/<user>/yardstick)
+      set_fact:
+        wd_base_effective: >-
+          {{ (wd_base is defined and (wd_base | string) | length > 0)
+             | ternary(wd_base, '/local/' ~ _user_effective ~ '/yardstick') }}
+
+    - name: Compute per-host workdir
+      set_fact:
+        wd: "{{ wd_base_effective }}/{{ inventory_hostname }}"
+
+  tasks:
+    - name: Create working directory
+      file:
+        path: "{{ wd }}"
+        state: directory
+        mode: '0755'
+
+    - name: Ensure nvm is installed
+      shell: |
+        set -e
+        if ! command -v nvm >/dev/null 2>&1; then
+          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.3/install.sh | bash
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Install Node.js {{ node_version }} via nvm
+      shell: |
+        set -e
+        export NVM_DIR="$HOME/.nvm"
+        . "$NVM_DIR/nvm.sh"
+        nvm install {{ node_version }}
+        nvm use {{ node_version }}
+        node --version
+        npm --version
+      args:
+        executable: /bin/bash
+
+    - name: Install npm dependencies (mineflayer for legacy; rcon-client & yargs for both)
+      shell: |
+        set -e
+        export NVM_DIR="$HOME/.nvm"
+        . "$NVM_DIR/nvm.sh"
+        nvm use {{ node_version }}
+        npm install mineflayer yargs rcon-client
+      args:
+        chdir: "{{ wd }}"
+        executable: /bin/bash"
+
+    - name: Copy diskload_bot.js (kept for compatibility)
+      copy:
+        src: "{{ workload_template }}/diskload_bot.js"
+        dest: "{{ wd }}/diskload_bot.js"
+        mode: '0755'
+        force: yes
+
+    - name: Copy RCON-only worker (current)
+      copy:
+        src: "{{ workload_template }}/diskload_worker_bot.js"
+        dest: "{{ wd }}/diskload_worker_bot.js"
+        mode: '0755'
+        force: yes
+
+    - name: Copy legacy mineflayer worker (for < 1.21.2)
+      copy:
+        src: "{{ workload_template }}/diskload_worker_legacy.js"
+        dest: "{{ wd }}/diskload_worker_legacy.js"
+        mode: '0755'
+        force: yes
+
+    - name: List deployed files
+      shell: "ls -l {{ wd }}"
+      changed_when: false

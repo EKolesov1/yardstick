@@ -1,27 +1,42 @@
 ---
 - name: Stop Telegraf
-  gather_facts: true
   hosts: all
+  gather_facts: false
+  vars:
+    wd: "{{ wd_base }}/{{ inventory_hostname }}"
+    telegraf_pidfile: "{{ wd }}/telegraf-{{ inventory_hostname }}.pid"
   tasks:
-    - name: Lookup Telegraf PID
-      shell: |
-        cat {{wd}}/telegraf-{{inventory_hostname}}.pid
-      register: shell_telegraf_pid
-    - set_fact:
-        telegraf_pid: "{{ shell_telegraf_pid.stdout }}"
-    - name: Stop Telegraf
-      shell:
-        cmd: |
-          kill {{ telegraf_pid }}
-    - name: Wait for Telegraf to stop
-      block:
-        - wait_for:
-            # Using https://stackoverflow.com/questions/46515704/how-to-kill-a-running-process-using-ansible/46541018#46541018
-            path: "/proc/{{ telegraf_pid }}/status"
-            state: absent
-            timeout: 15
-          register: wait_for_stop
-      rescue:
-        - name: Force kill stuck processes
-          shell: |
-            kill -9 {{ telegraf_pid }}
+    - name: Read Telegraf PID (if present)
+      shell: "cat {{ telegraf_pidfile }}"
+      register: pid_read
+      changed_when: false
+      failed_when: false
+
+    - name: Set PID (trim) if pidfile exists
+      set_fact:
+        telegraf_pid: "{{ pid_read.stdout | trim }}"
+      when: pid_read.rc == 0 and (pid_read.stdout | trim) != ""
+
+    - name: Skip stop if not running
+      debug:
+        msg: "Telegraf not running; skipping."
+      when: telegraf_pid is not defined
+
+    - name: Graceful stop (SIGTERM)
+      shell: "kill {{ telegraf_pid }}"
+      when: telegraf_pid is defined
+      failed_when: false
+
+    - name: Wait for Telegraf to stop (15s)
+      wait_for:
+        path: "/proc/{{ telegraf_pid }}/status"
+        state: absent
+        timeout: 15
+      when: telegraf_pid is defined
+      failed_when: false
+
+    - name: Remove pidfile
+      file:
+        path: "{{ telegraf_pidfile }}"
+        state: absent
+      when: telegraf_pid is defined

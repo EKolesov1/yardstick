@@ -1,0 +1,186 @@
+- name: Start DiskLoad
+  hosts: all
+  gather_facts: true
+
+  vars:
+    bots_per_node: 100
+    builders_per_node: "{{ bots_per_node }}"
+    teleport_interval: 1
+    tp_range: "{{ radius | default(2000) }}"
+    fill_size: 96
+    fill_height: 5
+    fills_per_interval: 8
+    flush_every: 0
+    cmds_per_sec: 30
+    rcon_port: 25575
+    rcon_password: password
+    forceload: false
+
+  pre_tasks:
+    - name: Compute effective user name for paths
+      set_fact:
+        _user_effective: >-
+          {{
+            (ansible_user | default(ansible_user_id, true))
+            | default(ansible_env.USER, true)
+            | default(lookup('env','USER'), true)
+            | default('unknown')
+          }}
+
+    - name: Compute wd_base (fallback to /local/<user>/yardstick)
+      set_fact:
+        wd_base_effective: >-
+          {{
+            (wd_base is defined and (wd_base | string) | length > 0)
+            | ternary(wd_base, '/local/' ~ _user_effective ~ '/yardstick')
+          }}
+
+    - name: Compute per-host workdir
+      set_fact:
+        wd: "{{ wd_base_effective ~ '/' ~ inventory_hostname }}"
+
+    - name: Discover PaperMC server host from marker (only if mc_host not provided)
+      when: mc_host is not defined or (mc_host | string) | length == 0
+      block:
+        - name: Check marker on all nodes
+          stat:
+            path: /tmp/yardstick_papermc_server
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['all'] }}"
+          register: pmc_markers
+          run_once: true
+
+        - name: Set mc_host from first marker
+          set_fact:
+            mc_host: >-
+              {{ (pmc_markers.results
+                  | selectattr('stat.exists')
+                  | map(attribute='item')
+                  | list
+                  | first) | default('') }}
+          delegate_to: localhost
+          run_once: true
+
+        - name: Fail if no server marker found and mc_host not passed
+          fail:
+            msg: "No PaperMC server marker found on any host and 'mc_host' was not provided."
+          when: hostvars['localhost']['mc_host'] == ''
+          run_once: true
+
+    - name: Show resolved mc_host
+      debug:
+        msg: "mc_host resolved to {{ hostvars['localhost']['mc_host'] | default(mc_host) }}"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Read server version from latest.log on the MC host
+      shell: |
+        set -e
+        awk -F'[][]' '/Starting minecraft server version/{print $3; exit}' /local/$USER/papermc/logs/latest.log
+      register: mc_ver_out
+      delegate_to: "{{ hostvars['localhost']['mc_host'] | default(mc_host) }}"
+      run_once: true
+
+    - name: Decide worker script by server version (<1.21.2 => legacy mineflayer)
+      set_fact:
+        _server_version: "{{ mc_ver_out.stdout | trim }}"
+        worker_js: >-
+          {{ 'diskload_bot.js'
+             if (mc_ver_out.stdout | trim) is version('1.21.2', '<')
+             else 'diskload_worker_bot.js' }}
+      run_once: true
+
+    - name: Show chosen worker
+      debug:
+        msg: "Server {{ _server_version }} -> worker {{ worker_js }}"
+      run_once: true
+
+  tasks:
+    - name: Check DiskLoad scripts exist (both variants should be present)
+      stat:
+        path: "{{ wd }}/{{ item }}"
+      loop:
+        - diskload_worker_bot.js     # RCON-only (>=1.21.2)
+        - diskload_bot.js            # legacy mineflayer (<1.21.2)
+      register: script_stats
+
+    - name: Fail if any script is missing (did you run DiskLoad deploy?)
+      fail:
+        msg: "Missing {{ wd }}/{{ item.item }} on {{ inventory_hostname }}. Run the DiskLoad deploy first."
+      when: not item.stat.exists
+      loop: "{{ script_stats.results }}"
+      loop_control:
+        label: "{{ wd }}/{{ item.item }}"
+
+    - name: Ensure Node 18 via nvm is available
+      shell: |
+        set -e
+        export NVM_DIR="$HOME/.nvm"
+        . "$NVM_DIR/nvm.sh"
+        nvm use 18
+        node --version
+      args:
+        executable: /bin/bash
+        chdir: "{{ wd }}"
+      register: nodever
+      changed_when: false
+
+    # === Launch the correct worker on non-server nodes ===
+    - name: Launch DiskLoad worker (RCON-only, >=1.21.2)
+      shell: |
+        set -e
+        export NVM_DIR="$HOME/.nvm"
+        . "$NVM_DIR/nvm.sh"
+        nvm use 18
+        node --check diskload_worker_bot.js
+        nohup node diskload_worker_bot.js \
+          --host {{ hostvars['localhost']['mc_host'] | default(mc_host) }} \
+          --rcon_port {{ rcon_port }} \
+          --rcon_password {{ rcon_password }} \
+          --batch_interval {{ teleport_interval }} \
+          --fill_size {{ fill_size }} \
+          --fill_height {{ fill_height }} \
+          --fills_per_batch {{ fills_per_interval }} \
+          {{ '--forceload' if forceload else '' }} \
+          --cmds_per_sec {{ cmds_per_sec }} \
+          &> diskload.log & echo $! > diskload.pid
+      args:
+        chdir: "{{ wd }}"
+        executable: /bin/bash
+      when:
+        - inventory_hostname != (hostvars['localhost']['mc_host'] | default(mc_host))
+        - worker_js == 'diskload_worker_bot.js'
+
+    - name: Launch DiskLoad worker (legacy mineflayer, <1.21.2)
+      shell: |
+        set -e
+        export NVM_DIR="$HOME/.nvm"
+        . "$NVM_DIR/nvm.sh"
+        nvm use 18
+        node --check diskload_bot.js
+        nohup node diskload_bot.js \
+          --host {{ hostvars['localhost']['mc_host'] | default(mc_host) }} \
+          --port 25565 \
+          --bots-per-node {{ bots_per_node }} \
+          --teleport_interval {{ teleport_interval }} \
+          --range {{ tp_range }} \
+          --fill_size {{ fill_size }} \
+          --fill_height {{ fill_height }} \
+          --fills_per_interval {{ fills_per_interval }} \
+          --flush_every {{ flush_every }} \
+          --cmds_per_sec {{ cmds_per_sec }} \
+          --rcon_port {{ rcon_port }} \
+          --rcon_password {{ rcon_password }} \
+          {{ '--forceload' if forceload else '' }} \
+          &> diskload.log & echo $! > diskload.pid
+      args:
+        chdir: "{{ wd }}"
+        executable: /bin/bash
+      when:
+        - inventory_hostname != (hostvars['localhost']['mc_host'] | default(mc_host))
+        - worker_js == 'diskload_bot.js'
+
+    - name: Print log and pid locations
+      debug:
+        msg: "DiskLoad started on {{ inventory_hostname }}. Logs: {{ wd }}/diskload.log ; PID: {{ wd }}/diskload.pid"
+      when: inventory_hostname != (hostvars['localhost']['mc_host'] | default(mc_host))

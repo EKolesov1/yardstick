@@ -1,0 +1,56 @@
+- name: Deploy ComplexWalkAround workload
+  gather_facts: true
+  hosts: all
+
+  tasks:
+    - name: Create ComplexWalkAround working directory
+      file:
+        path: "{{ wd }}"
+        state: directory
+        mode: '0755'
+
+    - name: Ensure nvm is installed
+      shell: |
+        if ! command -v nvm &> /dev/null; then
+          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.3/install.sh | bash
+          . "$HOME/.nvm/nvm.sh"
+        fi
+      args:
+        executable: /bin/bash
+
+    - name: Install Node.js 18 via nvm
+      shell: |
+        . "$HOME/.nvm/nvm.sh"
+        nvm install 18
+      args:
+        executable: /bin/bash
+
+    - name: Install npm dependencies for ComplexWalkAround
+      shell: |
+        . "$HOME/.nvm/nvm.sh"
+        cd "{{ wd }}"
+        # initialize project if needed
+        if [ ! -f package.json ]; then
+          npm init -y
+        fi
+        npm install mineflayer mineflayer-pathfinder vec3 yargs rcon-client
+      args:
+        executable: /bin/bash
+        
+    - name: Copy spawn helper script
+      copy:
+        src: "{{ workload_template }}/complex_set_spawn.js"
+        dest: "{{ wd }}/complex_set_spawn.js"
+        mode: '0755'
+
+    - name: Copy bot script
+      copy:
+        src: "{{ workload_template }}/complex_bot.js"
+        dest: "{{ wd }}/complex_bot.js"
+        mode: '0755'
+
+    - name: Copy worker launcher
+      copy:
+        src: "{{ workload_template }}/complex_worker_bot.js"
+        dest: "{{ wd }}/complex_worker_bot.js"
+        mode: '0755'

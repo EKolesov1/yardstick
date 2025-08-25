@@ -1,0 +1,14 @@
+- name: Cleanup ComplexWalkAround
+  gather_facts: true
+  hosts: all
+
+  tasks:
+    - name: Remove all JS scripts
+      file:
+        path: "{{ wd }}/complex_*.js"
+        state: absent
+
+    - name: Remove log file
+      file:
+        path: "{{ wd }}/complex_walkaround.log"
+        state: absent

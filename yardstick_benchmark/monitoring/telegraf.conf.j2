@@ -136,7 +136,7 @@
 # Send telegraf metrics to file(s)
 [[outputs.file]]
   ## Files to write to, "stdout" is a specially handled file.
-  files = ["metrics-{{inventory_hostname}}.csv"]
+  files = ["{{ wd }}/metrics-{{ inventory_hostname }}.csv"]
 
   ## Use batch serialization format instead of line based delimiting.  The
   ## batch format allows for the production of non line based output formats and
@@ -160,6 +160,8 @@
   ## more about them here:
   ## https://github.com/influxdata/telegraf/blob/master/docs/DATA_FORMATS_OUTPUT.md
   data_format = "csv"
+  csv_header = false
+  csv_timestamp_format = "unix"
 
   ## Compress output data with the specified algorithm.
   ## If empty, compression will be disabled and files will be plain text.
@@ -223,6 +225,7 @@
 
 # Read metrics about disk IO by device
 [[inputs.diskio]]
+   interval = "1s"
   ## Devices to collect stats for
   ## Wildcards are supported except for disk synonyms like '/dev/disk/by-id'.
   ## ex. devices = ["sda", "sdb", "vd*", "/dev/disk/by-id/nvme-eui.00123deadc0de123"]
@@ -321,7 +324,7 @@
   # default_field_prefix    = ""
   # default_field_separator = "."
   # Add agents URLs to query
-  urls = ["http://localhost:8778/jolokia"]
+  urls = ["http://127.0.0.1:8778/jolokia"]
   # username = ""
   # password = ""
   # response_timeout = "5s"
@@ -365,7 +368,8 @@
 
 {% if inventory_hostname in execd_minecraft_ticks %}
 [[inputs.execd]]
-  command = ["python3", "{{wd}}/jolokia_get_minecraft_tick.py"]
+  command = ["python3", "{{wd}}/jolokia_get_minecraft_tick.py",
+             "--jolokia", "http://127.0.0.1:8778/jolokia"]
   data_format = "csv"
   csv_header_row_count = 1
 {% endif %}

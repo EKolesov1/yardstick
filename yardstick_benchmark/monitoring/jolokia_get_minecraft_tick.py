@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
-
 from urllib import request
+from urllib.error import URLError, HTTPError
+import argparse
 import json
 import time
+import sys
 
 PERIOD_S = 2.5
 
 def get_tick_durations(old, new):
     assert old is None or len(old) == 100
     assert len(new) == 100
-
     if old is None:
         return []
 
@@ -23,65 +23,92 @@ def get_tick_durations(old, new):
         if old[i] != new[i] and old[j] == new[j]:
             indices_last_new.append(i)
 
-    index_first_new = indices_first_new[0]
-    index_last_new = indices_last_new[0]
+    # default to first pair; adjust below if needed
+    index_first_new = indices_first_new[0] if indices_first_new else 0
+    index_last_new  = indices_last_new[0]  if indices_last_new  else 99
 
     if len(indices_first_new) != 1 or len(indices_last_new) != 1:
-        print("RARE EVENT!")
-        maxlen = 0
-        for s in indices_first_new:
-            for e in indices_last_new:
-                d = 0
-                if s <= e:
-                    d = e - s
-                else:
-                    d = 100 - s + e + 1
+        maxlen = -1
+        for s in indices_first_new or [0]:
+            for e in indices_last_new or [99]:
+                d = e - s if s <= e else 100 - s + e + 1
                 if d > maxlen:
                     maxlen = d
-                    index_first_new = s
-                    index_last_new = e
-
+                    index_first_new, index_last_new = s, e
 
     if index_first_new <= index_last_new:
-        return new[index_first_new:index_last_new+1]
+        return new[index_first_new:index_last_new + 1]
     else:
-        return new[index_first_new:] + new[:index_last_new+1]
+        return new[index_first_new:] + new[:index_last_new + 1]
 
-
-if __name__ == "__main__":
+def main():
+    # header for telegraf execd csv parser
     print("measurement,tick_duration_ms,tick_number,loop_iteration,timestamp_ms,computed_timestamp_ms")
+    sys.stdout.flush()
 
-    data_dict = {"type": "read", "mbean": "net.minecraft.server:type=Server", "attribute": "tickTimes", "path": ""}
-    data_enc = json.dumps(data_dict).encode('utf-8')
-    r = request.Request("http://localhost:8778/jolokia/", data=data_enc)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--jolokia", default="http://127.0.0.1:8778/jolokia")
+    args = ap.parse_args()
+    base = args.jolokia.rstrip("/") + "/"
+
+    req_body = json.dumps({
+        "type": "read",
+        "mbean": "net.minecraft.server:type=Server",
+        "attribute": "tickTimes",
+        "path": ""
+    }).encode("utf-8")
+    req = request.Request(base, data=req_body)
 
     prev = None
-
-    t = time.monotonic()
-
     tick_number = 0
     loop_iteration = 0
-    computed_timestamp = None
-    prev_tick_duration = None
+    computed_timestamp_ms = None
+    prev_tick_ns = None
+
+    t = time.monotonic()
 
     while True:
         t += PERIOD_S
         now = time.monotonic()
-        time.sleep(t - now)
-        with request.urlopen(r) as resp:
-            resp_enc = resp.read()
-            # 'b{"request":{"mbean":"net.minecraft.server:type=Server","attribute":"tickTimes","type":"read"},"value":[289409,204240,209490,200170,214170,213459,200270,214330,433520,637339,630230,384160,446700,228030,557510,257059,618959,956190,603250,208380,242239,561869,319440,262310,220520,241469,499589,377190,361880,276440,215829,205450,214360,197440,585350,308020,302799,393030,256400,253980,257850,240670,398650,222530,365240,218000,207360,293930,596580,452230,621069,395489,218000,216990,218930,620510,419869,205880,218020,662480,683600,598459,262660,202140,282060,222220,204070,200060,230420,249950,227590,237730,232170,527770,642410,671939,550010,210690,217470,203400,233720,238790,213600,204250,283690,255309,225790,517470,437730,320380,340419,220750,207610,214930,598840,310579,228690,257850,205210,217100],"status":200,"timestamp":1717945225}'
-            resp_dict = json.loads(resp_enc.decode('utf-8'))
-            curr = resp_dict["value"]
-            tick_times = get_tick_durations(prev, curr)
-            prev = curr
+        time.sleep(max(0.0, t - now))
+        now = time.monotonic()
 
-            for tick_duration in tick_times:
-                if computed_timestamp is None:
-                    computed_timestamp = now
-                else:
-                    computed_timestamp += max(50, prev_tick_duration)
-                print(f"minecraft_tick_duration,{tick_duration/1000000},{tick_number},{loop_iteration},{now*1000},{computed_timestamp}")
-                tick_number += 1
-                prev_tick_duration = tick_duration
+        try:
+            with request.urlopen(req, timeout=5) as resp:
+                resp_enc = resp.read()
+        except (URLError, HTTPError):
+            # Jolokia not up yet; keep the process alive for Telegraf execd
+            loop_iteration += 1
+            continue
+
+        try:
+            resp_dict = json.loads(resp_enc.decode("utf-8"))
+            curr = resp_dict["value"]  # list of 100 tick times in nanoseconds
+        except Exception:
+            loop_iteration += 1
+            continue
+
+        tick_times = get_tick_durations(prev, curr)
+        prev = curr
+
+        ts_ms_now = now * 1000.0
+        for tick_ns in tick_times:
+            # initialize computed timeline in ms; then advance by max(50 ms, last tick duration)
+            if computed_timestamp_ms is None:
+                computed_timestamp_ms = ts_ms_now
+            else:
+                # convert ns->ms for previous tick, use 50 ms minimum tick
+                step_ms = max(50.0, (prev_tick_ns or 50_000_000) / 1e6)
+                computed_timestamp_ms += step_ms
+
+            print(
+                f"minecraft_tick_duration,{tick_ns/1e6:.3f},{tick_number},{loop_iteration},{ts_ms_now:.3f},{computed_timestamp_ms:.3f}"
+            )
+            sys.stdout.flush()
+            tick_number += 1
+            prev_tick_ns = tick_ns
+
         loop_iteration += 1
+
+if __name__ == "__main__":
+    main()

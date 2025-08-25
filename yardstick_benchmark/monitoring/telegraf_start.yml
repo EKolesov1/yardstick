@@ -1,15 +1,35 @@
 ---
 - name: Start Telegraf
-  gather_facts: true
   hosts: all
-
+  gather_facts: true
+  vars:
+    wd: "{{ wd_base }}/{{ inventory_hostname }}"  
   tasks:
-    - name: Find executable
+    - name: Find telegraf executable under wd
       shell: |
-        find {{wd}} -type f -executable -name telegraf
+        set -e
+        find "{{ wd }}" -type f -executable -name telegraf | head -n1
       register: find_telegraf
-    - name: Run Telegraf
-      shell:
-        cmd: |
-          nohup {{find_telegraf.stdout}} --config telegraf-{{inventory_hostname}}.conf --pidfile {{wd}}/telegraf-{{inventory_hostname}}.pid &> telegraf.log &
-        chdir: "{{wd}}"
+      changed_when: false
+
+    - name: Fail if telegraf binary not found
+      fail:
+        msg: "Telegraf binary not found under {{ wd }}. Did deploy run here?"
+      when: (find_telegraf.stdout | trim) == ""
+
+    - name: Start Telegraf
+      shell: |
+        nohup "{{ find_telegraf.stdout | trim }}" \
+          --config "telegraf-{{ inventory_hostname }}.conf" \
+          --pidfile "{{ wd }}/telegraf-{{ inventory_hostname }}.pid" \
+          &> "telegraf.log" &
+      args:
+        chdir: "{{ wd }}"
+        executable: /bin/bash
+
+    - name: Wait until first metrics file appears
+      wait_for:
+        path: "{{ wd }}/metrics-{{ inventory_hostname }}.csv"
+        state: present
+        delay: 1
+        timeout: 30

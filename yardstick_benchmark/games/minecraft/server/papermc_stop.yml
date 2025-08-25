@@ -1,27 +1,83 @@
 ---
 - name: Stop PaperMC
-  gather_facts: true
   hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    paper_stop_grace: 20
+    paper_final_wait: 10
+
   tasks:
-    - name: Find PaperMC PID
-      shell: |
-        cat {{wd}}/papermc.pid
-      register: shell_papermc_pid
-    - name: Obtain PaperMC pid
-      set_fact:
-        papermc_pid: "{{ shell_papermc_pid.stdout }}"
-    - name: Stop PaperMC
-      shell: |
-        kill {{papermc_pid}}
-    - name: Wait for PaperMC to stop
-      block:
-        - wait_for:
-            # Using https://stackoverflow.com/questions/46515704/how-to-kill-a-running-process-using-ansible/46541018#46541018
-            path: "/proc/{{ papermc_pid }}/status"
-            state: absent
-            timeout: 15
-          register: wait_for_stop
-      rescue:
-        - name: Force kill stuck processes
-          shell: |
-            kill -9 {{papermc_pid}}
+    - name: Read PaperMC pidfile if present
+      ansible.builtin.shell: "cat papermc.pid"
+      args: { chdir: "{{ wd }}" }
+      register: pid_read
+      changed_when: false
+      failed_when: false
+
+    - name: Set PID (trim) if pidfile exists
+      ansible.builtin.set_fact:
+        papermc_pid: "{{ pid_read.stdout | trim }}"
+      when: pid_read.rc == 0 and (pid_read.stdout | trim) != ""
+
+    - name: Check if PID exists
+      ansible.builtin.stat:
+        path: "/proc/{{ papermc_pid }}/status"
+      register: pid_proc
+      when: papermc_pid is defined
+
+    - name: Skip stop if not running
+      ansible.builtin.debug:
+        msg: "PaperMC not running; skipping."
+      when: papermc_pid is not defined or (papermc_pid is defined and not pid_proc.stat.exists)
+
+    # Try graceful stop without sudo
+    - name: Graceful stop (TERM, no sudo)
+      ansible.builtin.shell: "kill -TERM {{ papermc_pid }}"
+      when: papermc_pid is defined and pid_proc.stat.exists
+      register: term_nosudo
+      failed_when: false
+
+    # If we lacked permission, retry with sudo only for this task
+    - name: Graceful stop (TERM, sudo fallback)
+      ansible.builtin.shell: "kill -TERM {{ papermc_pid }}"
+      when: papermc_pid is defined and pid_proc.stat.exists and term_nosudo.rc != 0
+      register: term_sudo
+      become: true
+      failed_when: false
+
+    - name: Wait for exit (grace {{ paper_stop_grace }}s)
+      ansible.builtin.wait_for:
+        path: "/proc/{{ papermc_pid }}/status"
+        state: absent
+        timeout: "{{ paper_stop_grace }}"
+      when: papermc_pid is defined and pid_proc.stat.exists
+      register: papermc_grace
+      failed_when: false
+
+    # Force kill if still running; sudo only if needed
+    - name: Force kill (KILL, no sudo)
+      ansible.builtin.shell: "kill -KILL {{ papermc_pid }}"
+      when: papermc_pid is defined and pid_proc.stat.exists and (papermc_grace is failed)
+      register: kill_nosudo
+      failed_when: false
+
+    - name: Force kill (KILL, sudo fallback)
+      ansible.builtin.shell: "kill -KILL {{ papermc_pid }}"
+      when: papermc_pid is defined and pid_proc.stat.exists and (papermc_grace is failed) and kill_nosudo.rc != 0
+      become: true
+      failed_when: false
+
+    - name: Confirm process gone
+      ansible.builtin.wait_for:
+        path: "/proc/{{ papermc_pid }}/status"
+        state: absent
+        timeout: "{{ paper_final_wait }}"
+      when: papermc_pid is defined and pid_proc.stat.exists and (papermc_grace is failed)
+      failed_when: false
+
+    - name: Remove pidfile
+      ansible.builtin.file:
+        path: "{{ wd }}/papermc.pid"
+        state: absent

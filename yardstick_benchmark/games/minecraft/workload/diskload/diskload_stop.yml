@@ -1,0 +1,69 @@
+- name: Stop DiskLoad (robust)
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    # If caller passed a wd, use it, else default to /local/<user>/yardstick/<host>
+    root_dir: "{{ (wd is defined and wd|length>0) | ternary(wd, wd_base ~ '/' ~ inventory_hostname) }}"
+    # If root_dir has a trailing diskload-<id>, strip it for the search
+    search_base: "{{ root_dir | regex_replace('/diskload-[^/]+$', '') }}"
+
+  tasks:
+    - name: Find diskload.pid anywhere under the host folder
+      ansible.builtin.find:
+        paths: "{{ search_base }}"
+        patterns: "diskload.pid"
+        file_type: file
+        recurse: yes
+      register: pidfiles
+
+    - name: Choose newest pidfile
+      ansible.builtin.set_fact:
+        dl_pidfile: "{{ (pidfiles.files | sort(attribute='mtime', reverse=true) | first).path }}"
+      when: pidfiles.matched | int > 0
+
+    - name: Show which pidfile will be used
+      ansible.builtin.debug:
+        msg: "Using pidfile: {{ dl_pidfile | default(search_base ~ '/diskload.pid') }} (found={{ pidfiles.matched|default(0) }})"
+
+    - name: Read PID
+      ansible.builtin.shell: "cat {{ dl_pidfile }}"
+      when: dl_pidfile is defined
+      register: pid_read
+      changed_when: false
+      failed_when: false
+
+    - name: Set PID
+      ansible.builtin.set_fact:
+        dl_pid: "{{ pid_read.stdout | trim }}"
+      when: pid_read.rc is defined and pid_read.rc == 0 and (pid_read.stdout | trim) != ""
+
+    - name: Graceful stop (SIGTERM)
+      ansible.builtin.shell: "kill -TERM {{ dl_pid }}"
+      when: dl_pid is defined
+
+    - name: Wait up to 120s for exit
+      ansible.builtin.wait_for:
+        path: "/proc/{{ dl_pid }}/status"
+        state: absent
+        timeout: 120
+      when: dl_pid is defined
+      register: graceful_wait
+      failed_when: false
+
+    - name: Force kill if still running
+      ansible.builtin.shell: "kill -KILL {{ dl_pid }}"
+      when: dl_pid is defined and (graceful_wait is failed)
+
+    - name: Remove pidfile
+      ansible.builtin.file:
+        path: "{{ dl_pidfile }}"
+        state: absent
+      when: dl_pidfile is defined
+
+    - name: Fallback — terminate any DiskLoad node processes
+      ansible.builtin.shell: |
+        pgrep -f "node .*diskload_(bot|worker)_bot\.js" | xargs -r kill -TERM
+      when: dl_pid is not defined
+      changed_when: false

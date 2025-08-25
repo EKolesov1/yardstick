@@ -1,0 +1,16 @@
+- name: Stop ComplexWalkAround
+  gather_facts: true
+  hosts: all
+
+  tasks:
+    - name: Kill complex worker bots
+      shell: |
+        . "$HOME/.nvm/nvm.sh"
+        if [ -f complex.pid ]; then kill "$(cat complex.pid)" || true; fi
+        # Only kill real node processes, not our shell:
+        pgrep -af '^node .*complex_worker_bot\.js\b' | awk '{print $1}' | xargs -r kill || true
+        pgrep -af '^node .*complex_bot\.js\b'        | awk '{print $1}' | xargs -r kill || true
+      args:
+        chdir: "{{ wd }}"
+        executable: /bin/bash
+      when: inventory_hostname in hostnames[1:]

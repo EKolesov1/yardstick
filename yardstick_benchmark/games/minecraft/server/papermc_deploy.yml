@@ -2,23 +2,45 @@
 - name: Deploy PaperMC
   gather_facts: true
   hosts: all
+
+  vars:
+    wd: "/local/{{ ansible_env.USER }}/papermc"
+
   tasks:
-    - file:
+    - name: Ensure PaperMC working dir exists on local disk
+      file:
         path: "{{ wd }}"
         state: directory
+        mode: "0755"
+
     - name: Download PaperMC
       get_url:
-        url: https://api.papermc.io/v2/projects/paper/versions/1.20.1/builds/58/downloads/paper-1.20.1-58.jar
-        dest: "{{ wd }}/paper-1.20.1-58.jar"
+        url: "https://api.papermc.io/v2/projects/paper/versions/{{ papermc_version }}/builds/{{ papermc_build }}/downloads/paper-{{ papermc_version }}-{{ papermc_build }}.jar"
+        dest: "{{ wd }}/paper-{{ papermc_version }}-{{ papermc_build }}.jar"
+        mode: "0644"
+
     - name: Copy config file
       template:
-        src: "{{papermc_template}}"
-        dest: "{{wd}}/server.properties" 
+        src: "{{ papermc_template }}"
+        dest: "{{ wd }}/server.properties"
+        mode: "0644"
+        force: yes
+    
+    - name: Copy Bukkit config
+      template:
+        src: "bukkit.yml.j2"
+        dest: "{{ wd }}/bukkit.yml"
+        mode: "0644"
+        force: yes
+
     - name: Accept EULA
       copy:
-        content: "eula=true"
+        content: "eula=true\n"
         dest: "{{ wd }}/eula.txt"
+        mode: "0644"
+
     - name: Download Jolokia JVM Agent
       get_url:
-        url: https://search.maven.org/remotecontent?filepath=org/jolokia/jolokia-agent-jvm/2.0.3/jolokia-agent-jvm-2.0.3-javaagent.jar
-        dest: "{{wd}}/jolokia-agent-jvm-2.0.3-javaagent.jar"
+        url: "https://search.maven.org/remotecontent?filepath=org/jolokia/jolokia-agent-jvm/{{ jolokia_version }}/jolokia-agent-jvm-{{ jolokia_version }}-javaagent.jar"
+        dest: "{{ wd }}/jolokia-agent-jvm-{{ jolokia_version }}-javaagent.jar"
+        mode: "0644"
